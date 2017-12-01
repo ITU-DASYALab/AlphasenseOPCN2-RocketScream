@@ -2,7 +2,10 @@
 /*
  * https://github.com/matthijskooijman/arduino-lmic
 This code intergrates an OPC-N2 air particle sensor, an SparkFun openlog data logger, 
-and a LoRa radio into an Arduino Pro Mini (ATmega328P, 3.3 v, MHz). The Pro Mini will...
+and a LoRa radio into an Arduino Pro Mini (ATmega328P, 3.3 v, MHz). The Pro Mini will 
+first connect to the OPC-N2 and get its data. It will then store the data on the 
+logger, and attempt to send the data to The Things Network over LoRa. Sending to TTN
+will timeout after a chosen interval. 
  */
 
 // -----------------------------------------------------------------
@@ -53,6 +56,8 @@ const lmic_pinmap lmic_pins = {
 };
 
 boolean hasSend = false;
+boolean readyForNextPackage = true;
+int sendCounter = 0;
 
 // -----------------------------------------------------------------
 // Handle LoRa events
@@ -106,7 +111,11 @@ void onEvent (ev_t ev) {
             }
             // Schedule next transmission
             Serial.println(F("Payload send"));
-            hasSend = true;
+            readyForNextPackage = true;
+            sendCounter = sendCounter + 1;
+            if(sendCounter >= 18){
+              hasSend = true;
+              }
             
             break;
         case EV_LOST_TSYNC:
@@ -141,24 +150,18 @@ void doSend(osjob_t* j, double data[]){
         Serial.println(F("OP_TXRXPEND, not sending"));
     } else {
         // Prepare upstream data transmission at the next possible time.
-        /*for (int i = 0; i < 19; i = i + 1){
-           String sdata = String(data[i]);
-           static uint8_t mydata[] = "Hello, world!";
-           static uint8_t value[] = {sdata.toInt()};
-           LMIC_setTxData2(1, value, sizeof(value)-1, 0);
+           String sdata = String(data[sendCounter]);
+           Serial.print(sdata);
+           char sdataChars[sdata.length()];
+           sdata.toCharArray(sdataChars, sdata.length()+1);
+           LMIC_setTxData2(1, (uint8_t *)sdataChars, sizeof(sdataChars), 0);
            Serial.println(F("Packet queued"));
-        }*/
-        String sdata = String(data[2]);
-        static uint8_t mydata[] = "Hello, world!";
-        static uint8_t value[] = {sdata.toInt()};
-        LMIC_setTxData2(1, mydata, sizeof(mydata), 0);
-        Serial.println(F("Packet queued"));
     }
     // Next TX is scheduled after TX_COMPLETE event.
 }
 
 // -----------------------------------------------------------------
-// Setup before run. If the OPC-N2 sensor does not respond, the Pro Mini will reset. 
+// Setup before run. If the OPC-N2 sensor does not respond, the Arduino will reset. 
 // -----------------------------------------------------------------   
 
 void setup(){
@@ -166,11 +169,7 @@ void setup(){
     Serial.begin(9600);
     logger.begin(9600);
     alpha.setup(particle_CS);
-
-    Serial.println("Testing OPC-N2 v" + String(alpha.firm_ver.major) + "." + String(alpha.firm_ver.minor));
     
-    // Read and print the configuration variables
-   
     if(alpha.toggle_fan(true) == 0){
         pinMode(resetPin, OUTPUT);
         delay(5);
@@ -198,6 +197,7 @@ void setup(){
 // -----------------------------------------------------------------   
 void loop(){
   
+  Serial.println("Begin OPCN2 read. Sample rate is (MS): "); Serial.print(sampleRate);
   alpha.beginSPI();
 
     hist = alpha.read_histogram();
@@ -205,6 +205,7 @@ void loop(){
     if ((hist.pm1 + hist.pm25 + hist.pm10) > 0 && hist.period > 0){
       delay(5000);
       // log the histogram data
+      /*
       Serial.print("\nSampling Period:\t"); Serial.println(hist.period);
       Serial.println("");
       Serial.println("--PM values--");
@@ -230,8 +231,8 @@ void loop(){
       Serial.print("bin15: "); Serial.println(hist.bin14);
       Serial.print("bin16: "); Serial.println(hist.bin15);
       Serial.println("");
+      */
       
-      /*
       logger.print("\nSampling Period:\t"); logger.println(hist.period);
       logger.println("");
       logger.println("--PM values--");
@@ -257,21 +258,29 @@ void loop(){
       logger.print("bin15: "); logger.println(hist.bin14);
       logger.print("bin16: "); logger.println(hist.bin15);
       logger.println("");
-      */
+      
       delay(300);
       alpha.endSPI();
       delay(300);
-      doSend(&sendJob, hist.allData);
+
+      Serial.print("Begin sending data to TTN");
       
       long now = millis();
-      long future = 30000; //30 sec timeout
+      long future = 30000; //30 sec timeout. Currently not enough to send all 18 values to ttn in one go.
       while(hasSend == false){
+        if(readyForNextPackage){
+          doSend(&sendJob, hist.allData);
+          readyForNextPackage = false;
+          }
+        
         os_runloop_once();
         if (millis() > now + future){
+          Serial.print("STOP!");
           break;
           }
       }
       hasSend = false; 
-      delay(1000);
+      readyForNextPackage = false;
+      delay(sampleRate);
     }
   }
